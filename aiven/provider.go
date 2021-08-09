@@ -5,8 +5,6 @@ package aiven
 import (
 	"context"
 	"fmt"
-	"github.com/aiven/terraform-provider-aiven/pkg/cache"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"log"
 	"net/url"
 	"strconv"
@@ -14,6 +12,8 @@ import (
 	"time"
 
 	"github.com/aiven/aiven-go-client"
+	"github.com/aiven/terraform-provider-aiven/pkg/cache"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 

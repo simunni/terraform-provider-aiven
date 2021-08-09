@@ -4,15 +4,14 @@ package aiven
 import (
 	"context"
 	"fmt"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"regexp"
 	"strings"
 
-	"github.com/aiven/terraform-provider-aiven/pkg/cache"
-	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
-
 	"github.com/aiven/aiven-go-client"
+	"github.com/aiven/terraform-provider-aiven/pkg/cache"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
+	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 )
 
 var aivenKafkaACLSchema = map[string]*schema.Schema{
