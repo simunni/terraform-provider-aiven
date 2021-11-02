@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/go-units"
+
 	"github.com/aiven/aiven-go-client"
 	"github.com/aiven/terraform-provider-aiven/pkg/ipfilter"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
@@ -102,6 +104,28 @@ func serviceCommonSchema() map[string]*schema.Schema {
 			Type:        schema.TypeBool,
 			Optional:    true,
 			Description: "Prevents the service from being deleted. It is recommended to set this to `true` for all production services to prevent unintentional service deletion. This does not shield against deleting databases or topics but for services with backups much of the content can at least be restored from backup in case accidental deletion is done.",
+		},
+		"disk_space": {
+			Type:             schema.TypeString,
+			Optional:         true,
+			Description:      "The disk space of the service, possible values depend on the service type, the cloud provider and the project. Reducing will result in the service rebalancing.",
+			DiffSuppressFunc: diskSpaceDiffSuppressFunc,
+			ValidateFunc:     validateHumanByteSizeString,
+		},
+		"disk_space_default": {
+			Type:        schema.TypeString,
+			Computed:    true,
+			Description: "The default disk space of the service, possible values depend on the service type, the cloud provider and the project. Its also the minimum value for `disk_space`",
+		},
+		"disk_space_step": {
+			Type:        schema.TypeString,
+			Computed:    true,
+			Description: "The default disk space step of the service, possible values depend on the service type, the cloud provider and the project. `disk_space` needs to increment from `disk_space_default` by increments of this size.",
+		},
+		"disk_space_cap": {
+			Type:        schema.TypeString,
+			Computed:    true,
+			Description: "The maximum disk space of the service, possible values depend on the service type, the cloud provider and the project.",
 		},
 		"service_uri": {
 			Type:        schema.TypeString,
@@ -259,6 +283,28 @@ var aivenServiceSchema = map[string]*schema.Schema{
 		Type:        schema.TypeBool,
 		Optional:    true,
 		Description: "Prevent service from being deleted. It is recommended to have this enabled for all services.",
+	},
+	"disk_space": {
+		Type:             schema.TypeString,
+		Optional:         true,
+		Description:      "The disk space of the service, possible values depend on the service type, the cloud provider and the project. Reducing will result in the service rebalancing.",
+		DiffSuppressFunc: diskSpaceDiffSuppressFunc,
+		ValidateFunc:     validateHumanByteSizeString,
+	},
+	"disk_space_default": {
+		Type:        schema.TypeString,
+		Computed:    true,
+		Description: "The default disk space of the service, possible values depend on the service type, the cloud provider and the project. Its also the minimum value for `disk_space`",
+	},
+	"disk_space_step": {
+		Type:        schema.TypeString,
+		Computed:    true,
+		Description: "The default disk space step of the service, possible values depend on the service type, the cloud provider and the project. `disk_space` needs to increment from `disk_space_default` by increments of this size.",
+	},
+	"disk_space_cap": {
+		Type:        schema.TypeString,
+		Computed:    true,
+		Description: "The maximum disk space of the service, possible values depend on the service type, the cloud provider and the project.",
 	},
 	"service_uri": {
 		Type:        schema.TypeString,
@@ -590,6 +636,7 @@ func resourceService() *schema.Resource {
 		ReadContext:        resourceServiceRead,
 		UpdateContext:      resourceServiceUpdate,
 		DeleteContext:      resourceServiceDelete,
+		CustomizeDiff:      resourceServiceCustomizeDiff,
 		Importer: &schema.ResourceImporter{
 			StateContext: resourceServiceState,
 		},
@@ -597,7 +644,6 @@ func resourceService() *schema.Resource {
 			Create: schema.DefaultTimeout(20 * time.Minute),
 			Update: schema.DefaultTimeout(20 * time.Minute),
 		},
-
 		Schema: aivenServiceSchema,
 	}
 }
@@ -657,71 +703,18 @@ func resourceServiceCreateWrapper(serviceType string) schema.CreateContextFunc {
 
 		return resourceServiceCreate(ctx, d, m)
 	}
-
 }
 
-func resourceServiceCreate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
-	client := m.(*aiven.Client)
-	serviceType := d.Get("service_type").(string)
-	userConfig := ConvertTerraformUserConfigToAPICompatibleFormat("service", serviceType, true, d)
-	vpcID := d.Get("project_vpc_id").(string)
-	var apiServiceIntegrations []aiven.NewServiceIntegration
-	tfServiceIntegrations := d.Get("service_integrations")
-	if tfServiceIntegrations != nil {
-		tfServiceIntegrationList := tfServiceIntegrations.([]interface{})
-		for _, definition := range tfServiceIntegrationList {
-			definitionMap := definition.(map[string]interface{})
-			sourceService := definitionMap["source_service_name"].(string)
-			apiIntegration := aiven.NewServiceIntegration{
-				IntegrationType: definitionMap["integration_type"].(string),
-				SourceService:   &sourceService,
-				UserConfig:      make(map[string]interface{}),
-			}
-			apiServiceIntegrations = append(apiServiceIntegrations, apiIntegration)
+func resourceServiceCustomizeDiffWrapper(serviceType string) schema.CustomizeDiffFunc {
+	return func(ctx context.Context, d *schema.ResourceDiff, m interface{}) error {
+		if err := d.SetNew("service_type", serviceType); err != nil {
+			return err
 		}
+		return resourceServiceCustomizeDiff(ctx, d, m)
 	}
-	project := d.Get("project").(string)
-	var vpcIDPointer *string
-	if len(vpcID) > 0 {
-		_, vpcID := splitResourceID2(vpcID)
-		vpcIDPointer = &vpcID
-	}
-
-	_, err := client.Services.Create(
-		project,
-		aiven.CreateServiceRequest{
-			Cloud:                 d.Get("cloud_name").(string),
-			MaintenanceWindow:     getMaintenanceWindow(d),
-			Plan:                  d.Get("plan").(string),
-			ProjectVPCID:          vpcIDPointer,
-			ServiceIntegrations:   apiServiceIntegrations,
-			ServiceName:           d.Get("service_name").(string),
-			ServiceType:           serviceType,
-			TerminationProtection: d.Get("termination_protection").(bool),
-			UserConfig:            userConfig,
-		},
-	)
-
-	if err != nil {
-		return diag.FromErr(err)
-	}
-
-	service, err := resourceServiceWait(ctx, d, m, "create")
-	if err != nil {
-		return diag.FromErr(err)
-	}
-
-	d.SetId(buildResourceID(d.Get("project").(string), service.Name))
-
-	err = copyServicePropertiesFromAPIResponseToTerraform(d, service, d.Get("project").(string))
-	if err != nil {
-		return diag.FromErr(err)
-	}
-
-	return nil
 }
 
-func resourceServiceRead(_ context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
+func resourceServiceRead(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	client := m.(*aiven.Client)
 
 	projectName, serviceName := splitResourceID2(d.Id())
@@ -732,8 +725,12 @@ func resourceServiceRead(_ context.Context, d *schema.ResourceData, m interface{
 		}
 		return nil
 	}
+	servicePlanParams, err := resourceServiceGetServicePlanParameters(ctx, client, d)
+	if err != nil {
+		return diag.FromErr(fmt.Errorf("unable to get service plan parameters: %w", err))
+	}
 
-	err = copyServicePropertiesFromAPIResponseToTerraform(d, service, projectName)
+	err = copyServicePropertiesFromAPIResponseToTerraform(d, service, servicePlanParams, projectName)
 	if err != nil {
 		return diag.FromErr(err)
 	}
@@ -741,49 +738,79 @@ func resourceServiceRead(_ context.Context, d *schema.ResourceData, m interface{
 	return nil
 }
 
+func resourceServiceCreate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
+	client := m.(*aiven.Client)
+
+	// get service plan specific defaults
+	servicePlanParams, err := resourceServiceGetServicePlanParameters(ctx, client, d)
+	if err != nil {
+		return diag.FromErr(fmt.Errorf("unable to get service plan parameters: %w", err))
+	}
+
+	serviceType := d.Get("service_type").(string)
+	project := d.Get("project").(string)
+
+	if _, err = client.Services.Create(
+		project,
+		aiven.CreateServiceRequest{
+			Cloud:                 d.Get("cloud_name").(string),
+			Plan:                  d.Get("plan").(string),
+			ProjectVPCID:          resourceServiceGetProjectVPCIdPointer(d),
+			ServiceIntegrations:   resourceServiceGetAPIServiceIntegrations(d),
+			MaintenanceWindow:     resourceServiceGetMaintenanceWindow(d),
+			ServiceName:           d.Get("service_name").(string),
+			ServiceType:           serviceType,
+			TerminationProtection: d.Get("termination_protection").(bool),
+			DiskSpaceMB:           resourceServiceGetDiskSpaceMBOrServicePlanDefault(d, servicePlanParams),
+			UserConfig:            ConvertTerraformUserConfigToAPICompatibleFormat("service", serviceType, true, d),
+		},
+	); err != nil {
+		return diag.FromErr(err)
+	}
+
+	service, err := resourceServiceWait(ctx, d, m, "create")
+	if err != nil {
+		return diag.FromErr(err)
+	}
+
+	d.SetId(buildResourceID(project, service.Name))
+
+	return resourceServiceRead(ctx, d, m)
+}
+
 func resourceServiceUpdate(ctx context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
 	client := m.(*aiven.Client)
 
-	if d.HasChanges("service_integrations") && len(d.Get("service_integrations").([]interface{})) != 0 {
-		return diag.Errorf("service_integrations field can only be set during creation of a service")
+	// get service plan specific defaults
+	servicePlanParams, err := resourceServiceGetServicePlanParameters(ctx, client, d)
+	if err != nil {
+		return diag.FromErr(fmt.Errorf("unable to get service plan parameters: %w", err))
 	}
 
 	projectName, serviceName := splitResourceID2(d.Id())
-	userConfig := ConvertTerraformUserConfigToAPICompatibleFormat("service", d.Get("service_type").(string), false, d)
-	vpcID := d.Get("project_vpc_id").(string)
-	var vpcIDPointer *string
-	if len(vpcID) > 0 {
-		_, vpcID := splitResourceID2(vpcID)
-		vpcIDPointer = &vpcID
-	}
-	_, err := client.Services.Update(
+
+	if _, err := client.Services.Update(
 		projectName,
 		serviceName,
 		aiven.UpdateServiceRequest{
 			Cloud:                 d.Get("cloud_name").(string),
-			MaintenanceWindow:     getMaintenanceWindow(d),
 			Plan:                  d.Get("plan").(string),
-			ProjectVPCID:          vpcIDPointer,
+			MaintenanceWindow:     resourceServiceGetMaintenanceWindow(d),
+			ProjectVPCID:          resourceServiceGetProjectVPCIdPointer(d),
 			Powered:               true,
 			TerminationProtection: d.Get("termination_protection").(bool),
-			UserConfig:            userConfig,
+			DiskSpaceMB:           resourceServiceGetDiskSpaceMBOrServicePlanDefault(d, servicePlanParams),
+			UserConfig:            ConvertTerraformUserConfigToAPICompatibleFormat("service", d.Get("service_type").(string), false, d),
 		},
-	)
-	if err != nil {
+	); err != nil {
 		return diag.FromErr(err)
 	}
 
-	service, err := resourceServiceWait(ctx, d, m, "update")
-	if err != nil {
+	if _, err := resourceServiceWait(ctx, d, m, "update"); err != nil {
 		return diag.FromErr(err)
 	}
 
-	err = copyServicePropertiesFromAPIResponseToTerraform(d, service, projectName)
-	if err != nil {
-		return diag.FromErr(err)
-	}
-
-	return nil
+	return resourceServiceRead(ctx, d, m)
 }
 
 func resourceServiceDelete(_ context.Context, d *schema.ResourceData, m interface{}) diag.Diagnostics {
@@ -799,7 +826,7 @@ func resourceServiceDelete(_ context.Context, d *schema.ResourceData, m interfac
 	return nil
 }
 
-func resourceServiceState(_ context.Context, d *schema.ResourceData, m interface{}) ([]*schema.ResourceData, error) {
+func resourceServiceState(ctx context.Context, d *schema.ResourceData, m interface{}) ([]*schema.ResourceData, error) {
 	client := m.(*aiven.Client)
 
 	if len(strings.Split(d.Id(), "/")) != 2 {
@@ -811,8 +838,12 @@ func resourceServiceState(_ context.Context, d *schema.ResourceData, m interface
 	if err != nil {
 		return nil, fmt.Errorf("unable to GET service %s: %s", d.Id(), err)
 	}
+	servicePlanParams, err := resourceServiceGetServicePlanParameters(ctx, client, d)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get service plan parameters: %w", err)
+	}
 
-	err = copyServicePropertiesFromAPIResponseToTerraform(d, service, projectName)
+	err = copyServicePropertiesFromAPIResponseToTerraform(d, service, servicePlanParams, projectName)
 	if err != nil {
 		return nil, err
 	}
@@ -843,18 +874,10 @@ func resourceServiceWait(ctx context.Context, d *schema.ResourceData, m interfac
 	return service.(*aiven.Service), nil
 }
 
-func getMaintenanceWindow(d *schema.ResourceData) *aiven.MaintenanceWindow {
-	dow := d.Get("maintenance_window_dow").(string)
-	t := d.Get("maintenance_window_time").(string)
-	if len(dow) > 0 && len(t) > 0 {
-		return &aiven.MaintenanceWindow{DayOfWeek: dow, TimeOfDay: t}
-	}
-	return nil
-}
-
 func copyServicePropertiesFromAPIResponseToTerraform(
 	d *schema.ResourceData,
 	service *aiven.Service,
+	servicePlanParams servicePlanParameters,
 	project string,
 ) error {
 	serviceType := d.Get("service_type").(string)
@@ -884,6 +907,18 @@ func copyServicePropertiesFromAPIResponseToTerraform(
 		return err
 	}
 	if err := d.Set("maintenance_window_time", service.MaintenanceWindow.TimeOfDay); err != nil {
+		return err
+	}
+	if err := d.Set("disk_space", humanReadableByteSize(service.DiskSpaceMB*units.MiB)); err != nil {
+		return err
+	}
+	if err := d.Set("disk_space_default", humanReadableByteSize(servicePlanParams.diskSizeMBDefault*units.MiB)); err != nil {
+		return err
+	}
+	if err := d.Set("disk_space_step", humanReadableByteSize(servicePlanParams.diskSizeMBStep*units.MiB)); err != nil {
+		return err
+	}
+	if err := d.Set("disk_space_cap", humanReadableByteSize(servicePlanParams.diskSizeMBMax*units.MiB)); err != nil {
 		return err
 	}
 	if err := d.Set("service_uri", service.URI); err != nil {
@@ -1009,4 +1044,177 @@ func copyConnectionInfoFromAPIResponseToTerraform(
 	}
 
 	return nil
+}
+
+func resourceServiceGetAPIServiceIntegrations(d resourceStateOrResourceDiff) []aiven.NewServiceIntegration {
+	var apiServiceIntegrations []aiven.NewServiceIntegration
+	tfServiceIntegrations := d.Get("service_integrations")
+	if tfServiceIntegrations != nil {
+		tfServiceIntegrationList := tfServiceIntegrations.([]interface{})
+		for _, definition := range tfServiceIntegrationList {
+			definitionMap := definition.(map[string]interface{})
+			sourceService := definitionMap["source_service_name"].(string)
+			apiIntegration := aiven.NewServiceIntegration{
+				IntegrationType: definitionMap["integration_type"].(string),
+				SourceService:   &sourceService,
+				UserConfig:      make(map[string]interface{}),
+			}
+			apiServiceIntegrations = append(apiServiceIntegrations, apiIntegration)
+		}
+	}
+	return apiServiceIntegrations
+}
+
+func resourceServiceGetProjectVPCIdPointer(d resourceStateOrResourceDiff) *string {
+	vpcID := d.Get("project_vpc_id").(string)
+	var vpcIDPointer *string
+	if len(vpcID) > 0 {
+		_, vpcID := splitResourceID2(vpcID)
+		vpcIDPointer = &vpcID
+	}
+	return vpcIDPointer
+}
+
+func resourceServiceGetMaintenanceWindow(d resourceStateOrResourceDiff) *aiven.MaintenanceWindow {
+	dow := d.Get("maintenance_window_dow").(string)
+	t := d.Get("maintenance_window_time").(string)
+	if len(dow) > 0 && len(t) > 0 {
+		return &aiven.MaintenanceWindow{DayOfWeek: dow, TimeOfDay: t}
+	}
+	return nil
+}
+
+func resourceServiceGetDiskSpaceMBOrServicePlanDefault(d resourceStateOrResourceDiff, params servicePlanParameters) int {
+	diskSpaceSchema, ok := d.GetOk("disk_space")
+	if !ok {
+		return params.diskSizeMBDefault
+	}
+	diskSizeMB, _ := units.RAMInBytes(diskSpaceSchema.(string))
+	return int(diskSizeMB / units.MiB)
+}
+
+type servicePlanParameters struct {
+	diskSizeMBDefault int
+	diskSizeMBStep    int
+	diskSizeMBMax     int
+}
+
+func servicePlanParamsDiskSizeIsConfigurable(params servicePlanParameters) bool {
+	return params.diskSizeMBMax != 0 && params.diskSizeMBStep != 0
+}
+
+func servicePlanParamsDiskSizeMatchesDefault(params servicePlanParameters, requestedDiskSpaceMB int) bool {
+	return params.diskSizeMBDefault == requestedDiskSpaceMB
+}
+
+func servicePlanParamsCheckDiskSize(params servicePlanParameters, requestedDiskSizeMB int) error {
+	if !servicePlanParamsDiskSizeMatchesDefault(params, requestedDiskSizeMB) && !servicePlanParamsDiskSizeIsConfigurable(params) {
+		return fmt.Errorf("service plan parameters are not configurable for this service")
+	}
+
+	humanReadableDiskSpaceDefault := humanReadableByteSize(params.diskSizeMBDefault * units.MiB)
+	humanReadableDiskSpaceMax := humanReadableByteSize(params.diskSizeMBMax * units.MiB)
+	humanReadableDiskSpaceStep := humanReadableByteSize(params.diskSizeMBStep * units.MiB)
+	humanReadableRequestedDiskSpace := humanReadableByteSize(requestedDiskSizeMB * units.MiB)
+
+	if requestedDiskSizeMB < params.diskSizeMBDefault {
+		return fmt.Errorf("requested disk size is too small: '%s' < '%s'", humanReadableRequestedDiskSpace, humanReadableDiskSpaceDefault)
+	}
+	if params.diskSizeMBMax != 0 {
+		if requestedDiskSizeMB > params.diskSizeMBMax {
+			return fmt.Errorf("requested disk size is too large: '%s' > '%s'", humanReadableRequestedDiskSpace, humanReadableDiskSpaceMax)
+		}
+	}
+	if params.diskSizeMBStep != 0 {
+		if (requestedDiskSizeMB-params.diskSizeMBDefault)%params.diskSizeMBStep != 0 {
+			return fmt.Errorf("requested disk size has to increase from: '%s' in increments of '%s'", humanReadableDiskSpaceDefault, humanReadableDiskSpaceStep)
+		}
+	}
+	return nil
+}
+
+func resourceServiceGetServicePlanParameters(ctx context.Context, client *aiven.Client, d resourceStateOrResourceDiff) (servicePlanParameters, error) {
+	project := d.Get("project").(string)
+	serviceType := d.Get("service_type").(string)
+	servicePlan := d.Get("plan").(string)
+	serviceRegion := d.Get("cloud_name").(string)
+
+	serviceTypesResponse, err := client.ServiceTypes.Get(project)
+	if err != nil {
+		return servicePlanParameters{}, fmt.Errorf("unable to get service types from api: %w", err)
+	}
+	serviceTypeDescription, ok := serviceTypesResponse.ServiceTypes[serviceType]
+	if !ok {
+		return servicePlanParameters{}, fmt.Errorf("service type '%s' unknown to service types api", serviceType)
+	}
+	for i := range serviceTypeDescription.ServicePlans {
+		servicePlanDescription := serviceTypeDescription.ServicePlans[i]
+		if servicePlanDescription.ServicePlan != servicePlan {
+			// wrong service plan
+			continue
+		}
+		serviceRegionDescription, ok := servicePlanDescription.Regions[serviceRegion]
+		if !ok {
+			// the region not be admissible for the plan
+			continue
+		}
+		return servicePlanParameters{
+			diskSizeMBDefault: serviceRegionDescription.DiskSpaceMB,
+			diskSizeMBMax:     serviceRegionDescription.DiskSpaceCapMB,
+			diskSizeMBStep:    serviceRegionDescription.DiskSpaceStepMB,
+		}, nil
+	}
+	return servicePlanParameters{}, fmt.Errorf("unable to find service plan parameters for '%s', '%s', '%s'", serviceType, servicePlan, serviceRegion)
+}
+
+// resourceServiceCustomizeDiff validates that the diff has a chance to be applied
+func resourceServiceCustomizeDiff(ctx context.Context, d *schema.ResourceDiff, m interface{}) error {
+	// Some service integrations can be created when creating a service, think 'read_replica' for example.
+	// Those are only applicable for the initial request and should not
+	if err := resourceServiceCustomizeDiffCheckNoNewServiceIntegrationAfterCreation(ctx, d, m); err != nil {
+		return fmt.Errorf("failed service integration check: %w", err)
+	}
+	// We need to validate that the configured disk space matches the service plan; consider the situation
+	// that we have custom disk space configured but want to migrate into a cloud and plan that do not support the configured
+	// disk space anymore
+	if err := resourceServiceCustomizeDiffCheckDiskSpace(ctx, d, m); err != nil {
+		return fmt.Errorf("failed disk space check: %w", err)
+	}
+
+	return nil
+}
+
+func resourceServiceCustomizeDiffCheckNoNewServiceIntegrationAfterCreation(ctx context.Context, d *schema.ResourceDiff, m interface{}) error {
+	if len(d.Id()) > 0 && d.HasChange("service_integrations") && len(d.Get("service_integrations").([]interface{})) != 0 {
+		return fmt.Errorf("service_integrations field can only be set during creation of a service")
+	}
+	return nil
+}
+
+func resourceServiceCustomizeDiffCheckDiskSpace(ctx context.Context, d *schema.ResourceDiff, m interface{}) error {
+	client := m.(*aiven.Client)
+
+	// the default should always be OK
+	if diskSizeSchema, ok := d.GetOk("disk_space"); !ok || diskSizeSchema.(string) == "" {
+		return nil
+	}
+
+	// check that disk size matches plan
+	servicePlanParams, err := resourceServiceGetServicePlanParameters(ctx, client, d)
+	if err != nil {
+		return fmt.Errorf("unable to get service plan parameters: %w", err)
+	}
+
+	if err = servicePlanParamsCheckDiskSize(servicePlanParams, resourceServiceGetDiskSpaceMBOrServicePlanDefault(d, servicePlanParams)); err != nil {
+		return fmt.Errorf("disk size check failed: %w", err)
+	}
+	return nil
+}
+
+func humanReadableByteSize(bsize int) string {
+	// we only allow GiB as unit and show decimal places to MiB precision, this should fix rounding issues
+	// when converting from mb to human readable and back
+	var suffixes = []string{"B", "KiB", "MiB", "GiB"}
+
+	return units.CustomSize("%.12g%s", float64(bsize), 1024.0, suffixes)
 }
