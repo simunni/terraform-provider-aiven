@@ -201,7 +201,7 @@ resource "aiven_flink_job" "testing" {
   project = aiven_flink.testing.project
   service_name = aiven_flink.testing.service_name
   job_name = var.job_name
-  table_id = [
+  table_ids = [
     aiven_flink_table.source.table_id,
     aiven_flink_table.sink.table_id
   ]
@@ -247,8 +247,8 @@ resource "aiven_flink_job" "testing" {
 					// job
 					resource.TestCheckResourceAttr("aiven_flink_job.testing", "project", projectName),
 					resource.TestCheckResourceAttr("aiven_flink_job.testing", "service_name", flinkServiceName),
-					resource.TestCheckResourceAttrSet("aiven_flink_job.testing", "table_id.0"),
-					resource.TestCheckResourceAttrSet("aiven_flink_job.testing", "table_id.1"),
+					resource.TestCheckResourceAttrSet("aiven_flink_job.testing", "table_ids.0"),
+					resource.TestCheckResourceAttrSet("aiven_flink_job.testing", "table_ids.1"),
 				),
 			},
 		},
@@ -390,7 +390,7 @@ resource "aiven_flink_job" "testing" {
   project = aiven_flink_table.source.project
   service_name = aiven_flink.testing.service_name
   job_name = var.job_name
-  table_id = [
+  table_ids = [
     aiven_flink_table.source.table_id,
     aiven_flink_table.sink.table_id
   ]
@@ -437,8 +437,8 @@ resource "aiven_flink_job" "testing" {
 					// job
 					resource.TestCheckResourceAttr("aiven_flink_job.testing", "project", projectName),
 					resource.TestCheckResourceAttr("aiven_flink_job.testing", "service_name", flinkServiceName),
-					resource.TestCheckResourceAttrSet("aiven_flink_job.testing", "table_id.0"),
-					resource.TestCheckResourceAttrSet("aiven_flink_job.testing", "table_id.1"),
+					resource.TestCheckResourceAttrSet("aiven_flink_job.testing", "table_ids.0"),
+					resource.TestCheckResourceAttrSet("aiven_flink_job.testing", "table_ids.1"),
 				),
 			},
 		},

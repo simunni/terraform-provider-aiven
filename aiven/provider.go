@@ -397,6 +397,18 @@ func validateDurationString(v interface{}, k string) (ws []string, errors []erro
 	return
 }
 
+// validateStringEnum returns a schema.ValidateFunc that ensures that a string one of a few possible values
+func validateStringEnum(vs ...string) schema.SchemaValidateFunc {
+	return func(v interface{}, k string) (ws []string, errors []error) {
+		for i := range vs {
+			if v.(string) == vs[i] {
+				return nil, nil
+			}
+		}
+		return nil, append(errors, fmt.Errorf("%q: invalid enum value, must be one of %v", k, vs))
+	}
+}
+
 func flattenToString(a []interface{}) []string {
 	r := make([]string, len(a))
 	for i, v := range a {

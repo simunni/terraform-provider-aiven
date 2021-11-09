@@ -10,6 +10,12 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 )
 
+var (
+	aivenFlinkTableConnectorTypes    = []string{"kafka", "upsert_kafka"}
+	aivenFlinkTableKafkaValueFormats = []string{"avro", "avro-confluent", "debezium-avro-confluent", "debezium-json", "json"}
+	aivenFlinkTableKafkaKeyFormats   = aivenFlinkTableKafkaValueFormats
+)
+
 var aivenFlinkTableSchema = map[string]*schema.Schema{
 	"project":      commonSchemaProjectReference,
 	"service_name": commonSchemaServiceNameReference,
@@ -32,11 +38,32 @@ var aivenFlinkTableSchema = map[string]*schema.Schema{
 		ForceNew:    true,
 		Description: complex("Name of the jdbc table that is to be connected to this table. Valid if the service integration id refers to a mysql or postgres service.").forceNew().build(),
 	},
+	"connector_type": {
+		Type:         schema.TypeString,
+		Optional:     true,
+		ForceNew:     true,
+		Description:  complex("When used as a source, upsert Kafka connectors update values that use an existing key and delete values that are null. For sinks, the connector correspondingly writes update or delete messages in a compacted topic. If no matching key is found, the values are added as new entries. For more information, see the Apache Flink documentation").forceNew().possibleValues(stringSliceToInterfaceSlice(aivenFlinkTableConnectorTypes)...).build(),
+		ValidateFunc: validateStringEnum(aivenFlinkTableConnectorTypes...),
+	},
 	"kafka_topic": {
 		Type:        schema.TypeString,
 		Optional:    true,
 		ForceNew:    true,
 		Description: complex("Name of the kafka topic that is to be connected to this table. Valid if the service integration id refers to a kafka service.").forceNew().build(),
+	},
+	"kafka_key_format": {
+		Type:         schema.TypeString,
+		Optional:     true,
+		ForceNew:     true,
+		Description:  complex("Kafka Key Format").forceNew().possibleValues(stringSliceToInterfaceSlice(aivenFlinkTableKafkaKeyFormats)...).build(),
+		ValidateFunc: validateStringEnum(aivenFlinkTableKafkaKeyFormats...),
+	},
+	"kafka_value_format": {
+		Type:         schema.TypeString,
+		Optional:     true,
+		ForceNew:     true,
+		Description:  complex("Kafka Value Format").forceNew().possibleValues(stringSliceToInterfaceSlice(aivenFlinkTableKafkaValueFormats)...).build(),
+		ValidateFunc: validateStringEnum(aivenFlinkTableKafkaValueFormats...),
 	},
 	"like_options": {
 		Type:        schema.TypeString,
@@ -109,20 +136,26 @@ func resourceFlinkTableCreate(ctx context.Context, d *schema.ResourceData, m int
 	serviceName := d.Get("service_name").(string)
 	integrationId := d.Get("integration_id").(string)
 	jdbcTable := d.Get("jdbc_table").(string)
+	connectorType := d.Get("connector_type").(string)
 	kafkaTopic := d.Get("kafka_topic").(string)
+	kafkaKeyFormat := d.Get("kafka_key_format").(string)
+	kafkaValueFormat := d.Get("kafka_value_format").(string)
 	likeOptions := d.Get("like_options").(string)
 	tableName := d.Get("table_name").(string)
 	partitionedBy := d.Get("partitioned_by").(string)
 	schemaSQL := d.Get("schema_sql").(string)
 
 	createRequest := aiven.CreateFlinkTableRequest{
-		IntegrationId: integrationId,
-		JDBCTable:     jdbcTable,
-		KafkaTopic:    kafkaTopic,
-		LikeOptions:   likeOptions,
-		Name:          tableName,
-		PartitionedBy: partitionedBy,
-		SchemaSQL:     schemaSQL,
+		IntegrationId:    integrationId,
+		JDBCTable:        jdbcTable,
+		ConnectorType:    connectorType,
+		KafkaTopic:       kafkaTopic,
+		KafkaKeyFormat:   kafkaKeyFormat,
+		KafkaValueFormat: kafkaValueFormat,
+		LikeOptions:      likeOptions,
+		Name:             tableName,
+		PartitionedBy:    partitionedBy,
+		SchemaSQL:        schemaSQL,
 	}
 
 	r, err := client.FlinkTables.Create(project, serviceName, createRequest)
