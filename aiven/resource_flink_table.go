@@ -4,6 +4,7 @@ package aiven
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/aiven/aiven-go-client"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
@@ -39,11 +40,12 @@ var aivenFlinkTableSchema = map[string]*schema.Schema{
 		Description: complex("Name of the jdbc table that is to be connected to this table. Valid if the service integration id refers to a mysql or postgres service.").forceNew().build(),
 	},
 	"connector_type": {
-		Type:         schema.TypeString,
-		Optional:     true,
-		ForceNew:     true,
-		Description:  complex("When used as a source, upsert Kafka connectors update values that use an existing key and delete values that are null. For sinks, the connector correspondingly writes update or delete messages in a compacted topic. If no matching key is found, the values are added as new entries. For more information, see the Apache Flink documentation").forceNew().possibleValues(stringSliceToInterfaceSlice(aivenFlinkTableConnectorTypes)...).build(),
-		ValidateFunc: validateStringEnum(aivenFlinkTableConnectorTypes...),
+		Type:          schema.TypeString,
+		Optional:      true,
+		ForceNew:      true,
+		Description:   complex("When used as a source, upsert Kafka connectors update values that use an existing key and delete values that are null. For sinks, the connector correspondingly writes update or delete messages in a compacted topic. If no matching key is found, the values are added as new entries. For more information, see the Apache Flink documentation").forceNew().possibleValues(stringSliceToInterfaceSlice(aivenFlinkTableConnectorTypes)...).build(),
+		ValidateFunc:  validateStringEnum(aivenFlinkTableConnectorTypes...),
+		ConflictsWith: []string{"jdbc_table"},
 	},
 	"kafka_topic": {
 		Type:        schema.TypeString,
@@ -96,6 +98,7 @@ func resourceFlinkTable() *schema.Resource {
 		CreateContext: resourceFlinkTableCreate,
 		ReadContext:   resourceFlinkTableRead,
 		DeleteContext: resourceFlinkTableDelete,
+		CustomizeDiff: resourceFlinkTableCustomizeDiff,
 		Schema:        aivenFlinkTableSchema,
 	}
 }
@@ -182,5 +185,34 @@ func resourceFlinkTableDelete(ctx context.Context, d *schema.ResourceData, m int
 	if err != nil && !aiven.IsNotFound(err) {
 		return diag.FromErr(err)
 	}
+	return nil
+}
+
+func resourceFlinkTableCustomizeDiff(ctx context.Context, d *schema.ResourceDiff, m interface{}) error {
+	// TODO: also validate schema SQL here once the API allows for it
+
+	if err := resourceFlinkTableCustomizeDiffValidateConnectorOptions(d); err != nil {
+		return fmt.Errorf("bad connector options: %w", err)
+	}
+	return nil
+}
+
+func resourceFlinkTableCustomizeDiffValidateConnectorOptions(d *schema.ResourceDiff) error {
+	fieldIsSet := func(k string) bool {
+		_, ok := d.GetOk(k)
+		return ok
+	}
+
+	anyJDBCFieldIsSet := fieldIsSet("jdbc_table")
+	anyKafkaFieldIsSet :=
+		fieldIsSet("kafka_topic") ||
+			fieldIsSet("connector_type") ||
+			fieldIsSet("kafka_key_format") ||
+			fieldIsSet("kafka_value_format")
+
+	if anyJDBCFieldIsSet && anyKafkaFieldIsSet {
+		return fmt.Errorf("jdbc specific fields ('jdbc_table') are mutually exclusive to kafka specific fields ('connector_type', 'kafka_topic', 'kafka_key_format', 'kafka_value_format'")
+	}
+
 	return nil
 }
